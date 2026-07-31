@@ -10,24 +10,40 @@
 document.addEventListener('DOMContentLoaded', () => {
 
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const isTouch = window.matchMedia('(hover:none)').matches;
+  const isTouch = window.matchMedia('(hover: none), (pointer: coarse)').matches
+    || ('ontouchstart' in window)
+    || (navigator.maxTouchPoints && navigator.maxTouchPoints > 0);
+
+  // single source of truth for CSS too — belt-and-suspenders alongside the media queries in style.css
+  document.documentElement.classList.toggle('is-touch', isTouch);
+  document.documentElement.classList.toggle('is-desktop', !isTouch);
 
   gsap.registerPlugin(ScrollTrigger);
-  if(!reduceMotion){ ScrollTrigger.normalizeScroll(true); }
+  // normalizeScroll smooths wheel/trackpad input on desktop; on touch it fights native
+  // momentum scrolling and costs battery, so it's desktop-only.
+  if(!reduceMotion && !isTouch){ ScrollTrigger.normalizeScroll(true); }
 
-  /* ============ helper: split text into word/line spans ============ */
+  /* ============ helper: split text into word/line spans, preserving inline styled children ============ */
   function splitLines(el){
-    const words = el.textContent.trim().split(/\s+/);
+    const nodes = Array.from(el.childNodes);
     el.innerHTML = '';
-    words.forEach((w, i) => {
-      const wrap = document.createElement('span');
-      wrap.className = 'split-line';
-      const inner = document.createElement('span');
-      inner.textContent = w + (i < words.length - 1 ? '\u00A0' : '');
-      wrap.appendChild(inner);
-      el.appendChild(wrap);
+    const spans = [];
+    nodes.forEach(node => {
+      const isText = node.nodeType === Node.TEXT_NODE;
+      const cls = isText ? null : node.className;
+      const words = (node.textContent || '').split(/\s+/).filter(Boolean);
+      words.forEach(w => {
+        const wrap = document.createElement('span');
+        wrap.className = 'split-line';
+        const inner = document.createElement('span');
+        if(cls) inner.className = cls;
+        inner.textContent = w + '\u00A0';
+        wrap.appendChild(inner);
+        el.appendChild(wrap);
+        spans.push(inner);
+      });
     });
-    return el.querySelectorAll('.split-line > span');
+    return spans;
   }
 
   /* ============ preloader ============ */
@@ -43,10 +59,14 @@ document.addEventListener('DOMContentLoaded', () => {
   tlPre.to(preBar, {width:'100%', duration:1.1, ease:'power2.inOut'})
        .to(preloader, {yPercent:-100, duration:.9, ease:'power4.inOut'}, '+=0.1');
 
-  /* ============ custom cursor ============ */
+  /* ============ custom cursor (desktop only) ============ */
   const cDot = document.querySelector('.cursor-dot');
   const cRing = document.querySelector('.cursor-ring');
-  if(!isTouch && cDot && cRing){
+  if(isTouch){
+    // remove entirely rather than just hide — no empty/broken cursor container ships to touch users
+    cDot?.remove();
+    cRing?.remove();
+  } else if(cDot && cRing){
     let mx=0,my=0, rx=0, ry=0;
     window.addEventListener('mousemove', e => { mx = e.clientX; my = e.clientY; cDot.style.left = mx+'px'; cDot.style.top = my+'px'; });
     gsap.ticker.add(() => {
@@ -59,7 +79,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  /* ============ magnetic buttons ============ */
+  /* ============ magnetic buttons (desktop only) ============ */
   if(!isTouch && !reduceMotion){
     document.querySelectorAll('.magnetic').forEach(el => {
       el.addEventListener('mousemove', e => {
@@ -70,6 +90,26 @@ document.addEventListener('DOMContentLoaded', () => {
       });
       el.addEventListener('mouseleave', () => gsap.to(el, {x:0, y:0, duration:.6, ease:'elastic.out(1,0.4)'}));
     });
+  }
+
+  /* ============ touch ripple + press feedback (touch only) ============ */
+  if(isTouch){
+    const rippleSelectors = '.btn, .nav-cta, .doc-card, .bento-card, .facility-card, .support-card, .adm-card';
+    document.querySelectorAll(rippleSelectors).forEach(el => el.classList.add('ripple-host'));
+    document.addEventListener('touchstart', e => {
+      const host = e.target.closest(rippleSelectors);
+      if(!host) return;
+      const touch = e.touches[0];
+      const r = host.getBoundingClientRect();
+      const size = Math.max(r.width, r.height) * 1.2;
+      const span = document.createElement('span');
+      span.className = 'ripple';
+      span.style.width = span.style.height = size + 'px';
+      span.style.left = (touch.clientX - r.left - size/2) + 'px';
+      span.style.top = (touch.clientY - r.top - size/2) + 'px';
+      host.appendChild(span);
+      setTimeout(() => span.remove(), 650);
+    }, {passive:true});
   }
 
   /* ============ nav scroll state + burger ============ */
@@ -113,10 +153,11 @@ document.addEventListener('DOMContentLoaded', () => {
       .from('.hero-scroll-cue', {opacity:0, duration:.6}, '-=0.4')
       .from('.marquee-strip', {yPercent:100, duration:.8, ease:'power3.out'}, '-=0.5');
 
-    // ambient particles
+    // ambient particles — fewer on touch devices to protect battery/perf
     const field = document.querySelector('.hero-particles');
     if(field && !reduceMotion){
-      for(let i=0;i<22;i++){
+      const particleCount = isTouch ? 9 : 22;
+      for(let i=0;i<particleCount;i++){
         const p = document.createElement('span');
         const size = 3 + Math.random()*6;
         p.style.width = size+'px'; p.style.height = size+'px';
@@ -132,25 +173,26 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
   if(reduceMotion){
-    document.querySelectorAll('[data-fade],[data-scale],[data-reveal]').forEach(el => { el.style.opacity = 1; el.style.transform='none'; });
+    document.querySelectorAll('[data-fade],[data-scale],[data-reveal],[data-blur]').forEach(el => { el.style.opacity = 1; el.style.transform='none'; el.style.filter='none'; });
   }
 
-  /* ============ hero parallax on scroll + mouse ============ */
+  /* ============ hero parallax on scroll + mouse (desktop: scrub parallax is costly on touch GPUs) ============ */
   const heroBgImg = document.querySelector('.hero-bg img');
-  if(heroBgImg && !reduceMotion){
+  if(heroBgImg && !reduceMotion && !isTouch){
     gsap.to(heroBgImg, {
       scale:1, yPercent:8, ease:'none',
       scrollTrigger:{trigger:'.hero', start:'top top', end:'bottom top', scrub:true}
     });
-    if(!isTouch){
-      document.querySelector('.hero').addEventListener('mousemove', e => {
-        const r = e.currentTarget.getBoundingClientRect();
-        const px = (e.clientX - r.left)/r.width - 0.5;
-        const py = (e.clientY - r.top)/r.height - 0.5;
-        gsap.to(heroBgImg, {x: px*-26, duration:1, ease:'power2.out'});
-        gsap.to('.hero-card', {x: px*14, y: py*14, duration:1, ease:'power2.out'});
-      });
-    }
+    document.querySelector('.hero').addEventListener('mousemove', e => {
+      const r = e.currentTarget.getBoundingClientRect();
+      const px = (e.clientX - r.left)/r.width - 0.5;
+      const py = (e.clientY - r.top)/r.height - 0.5;
+      gsap.to(heroBgImg, {x: px*-26, duration:1, ease:'power2.out'});
+      gsap.to('.hero-card', {x: px*14, y: py*14, duration:1, ease:'power2.out'});
+    });
+  } else if(heroBgImg && !reduceMotion && isTouch){
+    // lightweight one-time settle instead of continuous scrub — keeps the Ken Burns zoom, skips per-frame scroll math
+    gsap.set(heroBgImg, {scale:1.02});
   }
 
   /* ============ generic reveal system ============ */
@@ -163,6 +205,12 @@ document.addEventListener('DOMContentLoaded', () => {
   gsap.utils.toArray('[data-scale]').forEach(el => {
     gsap.to(el, {
       opacity:1, scale:1, duration:1.1, ease:'power3.out',
+      scrollTrigger:{trigger:el, start:'top 85%'}
+    });
+  });
+  gsap.utils.toArray('[data-blur]').forEach(el => {
+    gsap.to(el, {
+      opacity:1, y:0, filter:'blur(0px)', duration:1.3, ease:'power3.out',
       scrollTrigger:{trigger:el, start:'top 85%'}
     });
   });
@@ -183,7 +231,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   /* ============ philosophy stat count-up ============ */
-  gsap.utils.toArray('.philo-stat strong[data-count]').forEach(el => {
+  gsap.utils.toArray('.philo-stat-panel strong[data-count]').forEach(el => {
     const end = parseFloat(el.dataset.count);
     const suffix = el.dataset.suffix || '';
     const obj = {val:0};
@@ -219,8 +267,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  /* ============ campus media parallax ============ */
-  if(!reduceMotion){
+  /* ============ campus media parallax (desktop only — continuous scrub is costly on touch GPUs) ============ */
+  if(!reduceMotion && !isTouch){
     gsap.to('.cm-main', {yPercent:-6, ease:'none', scrollTrigger:{trigger:'.campus', start:'top bottom', end:'bottom top', scrub:true}});
     gsap.to('.cm-float', {yPercent:8, ease:'none', scrollTrigger:{trigger:'.campus', start:'top bottom', end:'bottom top', scrub:true}});
     gsap.to('.cm-ring', {rotate:80, ease:'none', scrollTrigger:{trigger:'.campus', start:'top bottom', end:'bottom top', scrub:true}});
@@ -297,6 +345,49 @@ document.addEventListener('DOMContentLoaded', () => {
       btn.textContent = 'Message sent ✓';
       setTimeout(() => { btn.textContent = original; form.reset(); }, 2400);
     });
+  }
+
+  /* ============ gallery lightbox ============ */
+  const lightbox = document.querySelector('.lightbox');
+  if(lightbox){
+    const lbImg = lightbox.querySelector('img');
+    document.querySelectorAll('.masonry-item img').forEach(img => {
+      img.addEventListener('click', () => {
+        lbImg.src = img.src; lbImg.alt = img.alt;
+        lightbox.classList.add('open');
+      });
+    });
+    lightbox.addEventListener('click', e => { if(e.target === lightbox || e.target.closest('.lightbox-close')) lightbox.classList.remove('open'); });
+    document.addEventListener('keydown', e => { if(e.key === 'Escape') lightbox.classList.remove('open'); });
+  }
+
+  /* ============ circulars search + filter ============ */
+  const docToolbar = document.querySelector('.doc-toolbar');
+  if(docToolbar){
+    const searchInput = docToolbar.querySelector('.doc-search input');
+    const filterBtns = docToolbar.querySelectorAll('.doc-filters button');
+    const cards = document.querySelectorAll('.doc-card');
+    function applyFilters(){
+      const q = (searchInput?.value || '').toLowerCase();
+      const activeBtn = docToolbar.querySelector('.doc-filters button.active');
+      const cat = activeBtn ? activeBtn.dataset.filter : 'all';
+      let visible = 0;
+      cards.forEach(card => {
+        const matchesText = card.textContent.toLowerCase().includes(q);
+        const matchesCat = cat === 'all' || card.dataset.cat === cat;
+        const show = matchesText && matchesCat;
+        card.style.display = show ? '' : 'none';
+        if(show) visible++;
+      });
+      const empty = document.querySelector('.doc-empty');
+      if(empty) empty.style.display = visible === 0 ? 'block' : 'none';
+    }
+    searchInput?.addEventListener('input', applyFilters);
+    filterBtns.forEach(btn => btn.addEventListener('click', () => {
+      filterBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      applyFilters();
+    }));
   }
 
   ScrollTrigger.refresh();
